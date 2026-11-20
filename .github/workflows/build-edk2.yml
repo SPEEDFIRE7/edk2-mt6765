@@ -1,0 +1,87 @@
+name: Build EDK2 MT6765 (Namespace)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Namespace runner profile"
+        required: true
+        default: "namespace-profile-speed"
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-edk2:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout MT6765 EDK2 platform
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Show runner resources
+        run: |
+          df -h
+          nproc
+          free -h
+          uname -a
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            acpica-tools nasm uuid-dev libssl-dev python3 python-is-python3 \
+            mkbootimg git make
+
+      - name: Clone EDK2 and edk2-platforms
+        run: |
+          git clone --recursive -b edk2-stable202302 \
+            https://github.com/tianocore/edk2.git edk2
+          git clone --depth=1 \
+            https://github.com/tianocore/edk2-platforms.git edk2-platforms
+
+          # firstrun.sh currently calls ../edk2/BaseTools while build_common.sh
+          # expects ./edk2. This sibling symlink satisfies both paths without
+          # modifying the platform source.
+          ln -sfn "$GITHUB_WORKSPACE/edk2" "$GITHUB_WORKSPACE/../edk2"
+
+      - name: Build EDK2 BaseTools
+        run: |
+          chmod +x firstrun.sh build.sh build_bootshim.sh
+          ./firstrun.sh
+
+      - name: Build MT6765 UEFI image
+        run: |
+          set -o pipefail
+          ./build.sh 2>&1 | tee "$GITHUB_WORKSPACE/edk2-build.log"
+          test -s boot-uefi.img
+          ls -lh boot-uefi.img
+          sha256sum boot-uefi.img
+
+      - name: Prepare artifacts
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          if [ -s boot-uefi.img ]; then
+            cp boot-uefi.img "$GITHUB_WORKSPACE/artifacts/"
+            sha256sum "$GITHUB_WORKSPACE/artifacts/boot-uefi.img" \
+              > "$GITHUB_WORKSPACE/artifacts/SHA256SUMS"
+          fi
+          if [ -f "$GITHUB_WORKSPACE/edk2-build.log" ]; then
+            cp "$GITHUB_WORKSPACE/edk2-build.log" "$GITHUB_WORKSPACE/artifacts/"
+          fi
+
+      - name: Upload build artifact and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edk2-mt6765-build
+          path: ${{ github.workspace }}/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
